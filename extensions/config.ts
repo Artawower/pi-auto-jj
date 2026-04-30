@@ -2,49 +2,56 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir } from "@mariozechner/pi-coding-agent";
 
-export interface JjAutoRevConfig {
-  enabled: boolean;
-  blockOnMismatch: boolean;
-  autoDescribe: boolean;
-  maxPromptLength: number;
+export interface Config {
+  readonly enabled: boolean;
+  readonly blockOnMismatch: boolean;
+  readonly autoDescribe: boolean;
+  readonly maxPromptLength: number;
 }
 
-const DEFAULT_CONFIG: JjAutoRevConfig = {
+const MAX_PROMPT_LENGTH = 500;
+
+const DEFAULTS: Config = {
   enabled: true,
   blockOnMismatch: true,
   autoDescribe: true,
   maxPromptLength: 72,
 };
 
-function readConfigFile(filePath: string): Record<string, unknown> {
-  if (!existsSync(filePath)) return {};
+export function loadConfig(cwd: string): Config {
+  const global = readJsonFile(join(getAgentDir(), "pi-jj-auto.json"));
+  const project = readJsonFile(join(cwd, ".pi", "pi-jj-auto.json"));
+  return parseConfig({ ...global, ...project });
+}
+
+function readJsonFile(path: string): Record<string, unknown> {
+  if (!existsSync(path)) return {};
   try {
-    return JSON.parse(readFileSync(filePath, "utf-8"));
+    return JSON.parse(readFileSync(path, "utf-8"));
   } catch (err) {
-    console.error(`[pi-jj-auto] Failed to read config ${filePath}: ${err}`);
+    console.error(`[pi-jj-auto] failed to parse config ${path}:`, err);
     return {};
   }
 }
 
-function validateConfig(raw: Record<string, unknown>): JjAutoRevConfig {
+function parseConfig(raw: Record<string, unknown>): Config {
   return {
-    enabled: raw.enabled === false ? false : true,
-    blockOnMismatch: raw.blockOnMismatch === false ? false : true,
-    autoDescribe: raw.autoDescribe === false ? false : true,
-    maxPromptLength:
-      typeof raw.maxPromptLength === "number" && raw.maxPromptLength > 0
-        ? Math.min(raw.maxPromptLength, 500)
-        : DEFAULT_CONFIG.maxPromptLength,
+    enabled: raw.enabled !== false,
+    blockOnMismatch: raw.blockOnMismatch !== false,
+    autoDescribe: raw.autoDescribe !== false,
+    maxPromptLength: parsePositiveInt(
+      raw.maxPromptLength,
+      DEFAULTS.maxPromptLength,
+      MAX_PROMPT_LENGTH,
+    ),
   };
 }
 
-export function loadConfig(cwd: string): JjAutoRevConfig {
-  const globalPath = join(getAgentDir(), "pi-jj-auto.json");
-  const projectPath = join(cwd, ".pi", "pi-jj-auto.json");
-
-  const globalConfig = readConfigFile(globalPath);
-  const projectConfig = readConfigFile(projectPath);
-
-  const merged = { ...globalConfig, ...projectConfig };
-  return validateConfig(merged);
+function parsePositiveInt(
+  value: unknown,
+  fallback: number,
+  max: number,
+): number {
+  if (typeof value !== "number" || value <= 0) return fallback;
+  return Math.min(value, max);
 }

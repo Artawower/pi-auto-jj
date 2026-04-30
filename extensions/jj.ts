@@ -1,45 +1,97 @@
-import type { ExecResult } from "@mariozechner/pi-coding-agent";
+import { execFile } from "node:child_process";
 
-type Exec = (cmd: string, args: string[], opts?: any) => Promise<ExecResult>;
+export interface RevisionInfo {
+  changeId: string;
+  description: string;
+  hasDiff: boolean;
+}
 
-const DESC_TEMPLATE = 'if(description, description, "")';
+export async function getRevisionInfo(
+  cwd: string,
+  signal?: AbortSignal,
+): Promise<RevisionInfo> {
+  const template =
+    'change_id.short() ++ "\\n" ++ if(description, description, "") ++ "\\n" ++ if(diff.files(), "yes", "no")';
+
+  const { stdout } = await jj(
+    ["log", "--no-graph", "-r", "@", "--template", template],
+    cwd,
+    signal,
+  );
+  const [changeId = "", description = "", diffFlag = "no"] = stdout
+    .trim()
+    .split("\n");
+
+  return {
+    changeId: changeId.trim(),
+    description: description.trim(),
+    hasDiff: diffFlag.trim() === "yes",
+  };
+}
 
 export async function getCurrentDescription(
-  exec: Exec,
   cwd: string,
   signal?: AbortSignal,
 ): Promise<string> {
-  const { stdout } = await exec(
-    "jj",
-    ["log", "--no-graph", "-r", "@", "--template", DESC_TEMPLATE],
-    { signal, cwd },
+  const { stdout } = await jj(
+    [
+      "log",
+      "--no-graph",
+      "-r",
+      "@",
+      "--template",
+      'if(description, description, "")',
+    ],
+    cwd,
+    signal,
   );
   return stdout.trim();
 }
 
 export async function hasDiff(
-  exec: Exec,
   cwd: string,
   signal?: AbortSignal,
 ): Promise<boolean> {
-  const { stdout } = await exec("jj", ["diff", "--stat"], { signal, cwd });
+  const { stdout } = await jj(["diff", "--stat"], cwd, signal);
   return stdout.trim().length > 0;
 }
 
 export async function describeRevision(
-  exec: Exec,
   cwd: string,
   message: string,
   signal?: AbortSignal,
-): Promise<ExecResult> {
-  return exec("jj", ["desc", "-m", message], { signal, cwd });
+): Promise<void> {
+  await jj(["desc", "-m", message], cwd, signal);
 }
 
-export async function isJjRepo(exec: Exec, cwd: string): Promise<boolean> {
+export async function isJjRepo(cwd: string): Promise<boolean> {
   try {
-    const { exitCode } = await exec("jj", ["root"], { cwd });
-    return exitCode === 0;
+    await jj(["root"], cwd);
+    return true;
   } catch {
     return false;
   }
+}
+
+function jj(
+  args: string[],
+  cwd: string,
+  signal?: AbortSignal,
+): Promise<{ stdout: string }> {
+  return new Promise((resolve, reject) => {
+    const child = execFile(
+      "jj",
+      args,
+      { cwd, signal, encoding: "utf8", maxBuffer: 10 * 1024 * 1024 },
+      (error, stdout, stderr) => {
+        if (error) {
+          reject(new Error(`jj ${args.join(" ")} failed: ${stderr}`));
+        } else {
+          resolve({ stdout: stdout ?? "" });
+        }
+      },
+    );
+
+    signal?.addEventListener("abort", () => child.kill(), { once: true });
+  });
 }

@@ -1,6 +1,6 @@
 {
   "name": "pi-jj-auto",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Automatic jj revision management — guards file edits to keep Jujutsu revisions focused",
   "keywords": [
     "pi-package"

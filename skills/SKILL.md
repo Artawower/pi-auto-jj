@@ -1,56 +1,49 @@
 ---
 name: pi-jj-auto
-description: Automatic jj revision hygiene for pi. Use in jj repositories to keep revisions focused — check revision scope before starting work, handle blocked edits, and follow the decision rules for jj new vs jj desc.
+description: jj revision hygiene for pi. Use in jj repositories — check revision scope before writing, run jj new for unrelated work, describe revisions after changes.
 ---
 
-# pi-jj-auto: jj Revision Guard
+# pi-jj-auto: jj Revision Hygiene
 
-Extends the `jj` skill with an automatic guard on `write`/`edit` tools.
-
-## Proactive check — once per new task
-
-At the start of each new user request, before any work, run once:
+## Before the first file change — check once
 
 ```bash
 jj log --no-graph -r @ --template 'change_id.short() ++ " | " ++ if(description, description, "(empty)") ++ " | diff:" ++ if(diff.files(), "yes", "no")'
 ```
 
-Decide based on the result:
+## Decision table
 
-| description | diff  | What to do                                                                                               |
-| ----------- | ----- | -------------------------------------------------------------------------------------------------------- |
-| empty       | any   | Work freely — fresh or WIP revision. Describe it when done.                                              |
-| exists      | empty | Work freely — revision just created, not started yet                                                     |
-| exists      | yes   | Compare **semantic scope** with current task: same scope → continue; different scope → `jj new -m "..."` |
+| description | diff | What to do                                                                                  |
+| ----------- | ---- | ------------------------------------------------------------------------------------------- |
+| `(empty)`   | no   | Work freely. After the first write/edit run: `jj describe -m "<what you actually changed>"` |
+| `(empty)`   | yes  | Stop. Run `jj describe -m "<summary>"` or `jj new -m "<summary>"` first.                    |
+| exists      | no   | Check scope. Different task → `jj new -m "<summary>"` before writing.                       |
+| exists      | yes  | Check scope. Same work → continue. Different → `jj new -m "<summary>"` before writing.      |
 
-**Semantic scope** means the logical unit of work — not the exact words. "Add test for login fix" is the same scope as "fix login bug". "Add dark mode" is a different scope.
+## Semantic scope
 
-One check per task is enough. The guard is a fallback for when this step is skipped.
+Same scope: "add test for login fix" and "fix login bug".  
+Different scope: "add dark mode" and "fix login bug".  
+When unsure — `jj new`. Cheap to squash later: `jj squash`.
 
-## When the guard blocks your edit
+## After writing to a fresh revision
 
-The extension returns `block: true` only when `description` exists **and** `diff` is non-empty:
+```bash
+jj describe -m "<short summary of the actual change>"
+```
+
+Describe the actual change, not the user request verbatim.
+
+## When the extension blocks
 
 ```
-[pi-jj-auto] Revision "fix login bug" already has work.
-Your task: "add dark mode"
+[pi-jj-auto] Revision has uncommitted changes but no description.
 ```
 
-Response:
-
-1. **Different scope** → `jj new -m "add dark mode"` then retry
-2. **Same scope, broader** → `jj desc -m "fix login bug + add dark mode"` then retry
-3. **Unsure** → create a new revision; it's cheap to merge later with `jj squash`
+Same task → `jj describe -m "<summary>"` then retry.  
+Different task → `jj new -m "<summary>"` then retry.
 
 ## Hard rules
 
-- Run the check **once** at the start of each new task — not before every file edit
-- If revision description is empty after your changes — describe it: `jj desc -m "<message>"`
-- Follow the project's existing commit message style (check `jj log` for examples)
-- One revision = one logical change; do not mix unrelated work
+- One revision = one logical change
 - Never use `git commit` or `git add`
-
-## Limitations
-
-- Only `write` and `edit` tools are intercepted — `bash` mutations are not guarded
-- Use built-in `write`/`edit` for file changes when the guard matters

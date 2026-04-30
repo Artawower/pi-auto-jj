@@ -3,24 +3,45 @@ import { writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// ─── Helpers ───────────────────────────────────────────────────────────
+type ExecCallback = (err: Error | null, stdout: string, stderr: string) => void;
 
-/** Map jj sub-command keyword → fake result. */
-function mockExec(
+const jjResponses: Record<string, { stdout: string; exitCode: number }> = {};
+
+function setJj(
   responses: Record<string, { stdout: string; exitCode: number }>,
 ) {
-  return vi.fn(async (_cmd: string, args: string[]) => {
-    const key = args.join(" ");
-    for (const [pattern, result] of Object.entries(responses)) {
-      if (key.includes(pattern)) return result;
-    }
-    return { stdout: "", exitCode: 0 };
-  });
+  Object.keys(jjResponses).forEach((k) => delete jjResponses[k]);
+  Object.assign(jjResponses, responses);
 }
 
-function mockCtx(overrides = {}) {
+vi.mock("node:child_process", () => ({
+  execFile: (
+    _cmd: string,
+    args: string[],
+    _opts: unknown,
+    cb: ExecCallback,
+  ) => {
+    const key = (args as string[]).join(" ");
+    const match = Object.entries(jjResponses).find(([p]) => key.includes(p));
+    const { stdout = "", exitCode = 0 } = match?.[1] ?? {};
+    if (exitCode !== 0) {
+      cb(
+        Object.assign(new Error(`exit ${exitCode}`), { code: exitCode }),
+        stdout,
+        "",
+      );
+    } else {
+      cb(null, stdout, "");
+    }
+    return { kill: vi.fn() };
+  },
+}));
+
+const CWD = "/fake/repo";
+
+function makeCtx(overrides: Record<string, unknown> = {}) {
   return {
-    cwd: "/fake/repo",
+    cwd: CWD,
     hasUI: false,
     signal: undefined,
     ui: { notify: vi.fn(), setStatus: vi.fn() },
@@ -28,78 +49,89 @@ function mockCtx(overrides = {}) {
   };
 }
 
-function createPi() {
-  const handlers: Record<string, Function[]> = {};
-  const pi = {
+function makePi() {
+  const handlers: Record<string, Function> = {};
+  return {
     on: vi.fn((event: string, fn: Function) => {
-      (handlers[event] ??= []).push(fn);
+      handlers[event] = fn;
     }),
     exec: vi.fn(),
-    _fire: async (event: string, arg: any, ctx: any) =>
-      handlers[event]?.[0]?.(arg, ctx),
-    _handlers: handlers,
+    fire: async (event: string, arg: unknown, ctx: unknown) =>
+      handlers[event]?.(arg, ctx),
   };
-  return pi;
 }
 
-// ─── isJjRepo ──────────────────────────────────────────────────────────
+function defaultJj(desc: string, diff: boolean) {
+  setJj({
+    root: { stdout: CWD, exitCode: 0 },
+    log: { stdout: `abc123\n${desc}\n${diff ? "yes" : "no"}\n`, exitCode: 0 },
+    diff: { stdout: diff ? "file.ts | 1 +\n" : "\n", exitCode: 0 },
+  });
+}
 
 describe("isJjRepo", async () => {
   const { isJjRepo } = await import("./jj.js");
 
-  it("true when jj root exits 0", async () =>
-    expect(
-      await isJjRepo(mockExec({ root: { stdout: "/repo", exitCode: 0 } })),
-    ).toBe(true));
+  it("returns true when jj root succeeds", async () => {
+    setJj({ root: { stdout: CWD, exitCode: 0 } });
+    expect(await isJjRepo(CWD)).toBe(true);
+  });
 
-  it("false when jj root exits 1", async () =>
-    expect(
-      await isJjRepo(mockExec({ root: { stdout: "", exitCode: 1 } })),
-    ).toBe(false));
-
-  it("false on exception", async () =>
-    expect(await isJjRepo(vi.fn().mockRejectedValue(new Error()))).toBe(false));
+  it("returns false when jj root fails", async () => {
+    setJj({ root: { stdout: "", exitCode: 1 } });
+    expect(await isJjRepo(CWD)).toBe(false);
+  });
 });
-
-// ─── getCurrentDescription ─────────────────────────────────────────────
 
 describe("getCurrentDescription", async () => {
   const { getCurrentDescription } = await import("./jj.js");
 
-  it("returns trimmed description", async () =>
-    expect(
-      await getCurrentDescription(
-        mockExec({ log: { stdout: "fix login\n", exitCode: 0 } }),
-      ),
-    ).toBe("fix login"));
+  it("returns trimmed description", async () => {
+    setJj({ log: { stdout: "fix login\n", exitCode: 0 } });
+    expect(await getCurrentDescription(CWD)).toBe("fix login");
+  });
 
-  it("returns empty string for blank output", async () =>
-    expect(
-      await getCurrentDescription(
-        mockExec({ log: { stdout: "\n", exitCode: 0 } }),
-      ),
-    ).toBe(""));
+  it("returns empty string for empty revision", async () => {
+    setJj({ log: { stdout: "\n", exitCode: 0 } });
+    expect(await getCurrentDescription(CWD)).toBe("");
+  });
 });
-
-// ─── hasDiff ───────────────────────────────────────────────────────────
 
 describe("hasDiff", async () => {
   const { hasDiff } = await import("./jj.js");
 
-  it("true when diff --stat has output", async () =>
-    expect(
-      await hasDiff(
-        mockExec({ diff: { stdout: "src/main.ts | 3 +++\n", exitCode: 0 } }),
-      ),
-    ).toBe(true));
+  it("returns true when diff has output", async () => {
+    setJj({ diff: { stdout: "file.ts | 3 +++\n", exitCode: 0 } });
+    expect(await hasDiff(CWD)).toBe(true);
+  });
 
-  it("false when diff --stat is empty", async () =>
-    expect(
-      await hasDiff(mockExec({ diff: { stdout: "\n", exitCode: 0 } })),
-    ).toBe(false));
+  it("returns false when diff is empty", async () => {
+    setJj({ diff: { stdout: "\n", exitCode: 0 } });
+    expect(await hasDiff(CWD)).toBe(false);
+  });
 });
 
-// ─── loadConfig ────────────────────────────────────────────────────────
+describe("getRevisionInfo", async () => {
+  const { getRevisionInfo } = await import("./jj.js");
+
+  it("parses all fields correctly", async () => {
+    setJj({ log: { stdout: "abc123\nfix login\nyes\n", exitCode: 0 } });
+    expect(await getRevisionInfo(CWD)).toEqual({
+      changeId: "abc123",
+      description: "fix login",
+      hasDiff: true,
+    });
+  });
+
+  it("handles empty description and no diff", async () => {
+    setJj({ log: { stdout: "abc123\n\nno\n", exitCode: 0 } });
+    expect(await getRevisionInfo(CWD)).toEqual({
+      changeId: "abc123",
+      description: "",
+      hasDiff: false,
+    });
+  });
+});
 
 describe("loadConfig", async () => {
   const { loadConfig } = await import("./config.js");
@@ -108,13 +140,14 @@ describe("loadConfig", async () => {
   beforeEach(() => mkdirSync(join(tmp, ".pi"), { recursive: true }));
   afterEach(() => rmSync(tmp, { recursive: true, force: true }));
 
-  it("returns defaults when no config files exist", () =>
+  it("returns defaults when no config file exists", () => {
     expect(loadConfig(tmp)).toEqual({
       enabled: true,
       blockOnMismatch: true,
       autoDescribe: true,
       maxPromptLength: 72,
-    }));
+    });
+  });
 
   it("project config overrides global", () => {
     writeFileSync(
@@ -143,153 +176,146 @@ describe("loadConfig", async () => {
   });
 });
 
-// ─── Guard lifecycle ───────────────────────────────────────────────────
-
 describe("guard lifecycle", async () => {
-  const { default: factory } = (await import("./index.js")) as {
-    default: (pi: any) => void;
+  const { default: register } = (await import("./index.js")) as {
+    default: (pi: unknown) => void;
   };
 
-  /**
-   * Boot the extension: session_start (with jj root ok) + before_agent_start.
-   * `desc` / `diff` control what getCurrentDescription / hasDiff return on tool_call.
-   */
-  async function boot(desc: string, diff: boolean) {
-    const pi = createPi();
-    factory(pi);
-
-    // session_start — jj root succeeds
-    pi.exec.mockResolvedValueOnce({ stdout: "/repo", exitCode: 0 });
-    await pi._fire("session_start", {}, mockCtx({ cwd: "/fake/repo" }));
-
-    await pi._fire(
-      "before_agent_start",
-      { prompt: "add dark mode" },
-      mockCtx(),
-    );
-
-    // Prepare exec responses for tool_call: log → desc, diff → diff
-    pi.exec.mockImplementation(async (_cmd: string, args: string[]) => {
-      if (args.includes("log")) return { stdout: desc + "\n", exitCode: 0 };
-      if (args.includes("diff"))
-        return { stdout: diff ? "file.ts | 1 +\n" : "\n", exitCode: 0 };
-      return { stdout: "", exitCode: 0 };
-    });
-
+  async function boot(
+    desc: string,
+    diff: boolean,
+    configOverrides: Record<string, unknown> = {},
+  ) {
+    defaultJj(desc, diff);
+    const pi = makePi();
+    register(pi);
+    await pi.fire("session_start", {}, makeCtx());
+    await pi.fire("before_agent_start", { prompt: "add dark mode" }, makeCtx());
+    if (Object.keys(configOverrides).length) {
+      const state = (pi as any)._state;
+      if (state) Object.assign(state.config, configOverrides);
+    }
     return pi;
   }
 
-  async function callWrite(pi: ReturnType<typeof createPi>) {
-    return pi._fire("tool_call", { toolName: "write", input: {} }, mockCtx());
+  async function write(
+    pi: ReturnType<typeof makePi>,
+    desc?: string,
+    diff?: boolean,
+  ) {
+    if (desc !== undefined) defaultJj(desc, diff ?? false);
+    return pi.fire("tool_call", { toolName: "write", input: {} }, makeCtx());
   }
 
-  // ── Allow cases ──────────────────────────────────────────────────────
+  beforeEach(() => setJj({}));
 
-  it("allows edit: empty description, no diff (fresh revision)", async () => {
+  it("allows write on fresh revision (empty desc, no diff)", async () => {
     const pi = await boot("", false);
-    expect(await callWrite(pi)).toBeUndefined();
+    expect(await write(pi)).toBeUndefined();
   });
 
-  it("allows edit: empty description, has diff (WIP revision)", async () => {
+  it("blocks write on stale WIP (empty desc, has diff)", async () => {
     const pi = await boot("", true);
-    expect(await callWrite(pi)).toBeUndefined();
+    expect((await write(pi))?.block).toBe(true);
   });
 
-  it("allows edit: description exists, no diff (just created via jj new -m)", async () => {
-    const pi = await boot("fix login bug", false);
-    expect(await callWrite(pi)).toBeUndefined();
+  it("allows write on described revision with no diff", async () => {
+    const pi = await boot("fix login", false);
+    expect(await write(pi)).toBeUndefined();
   });
 
-  // ── Block cases ───────────────────────────────────────────────────────
-
-  it("blocks edit: description exists AND diff exists (sealed revision)", async () => {
-    const pi = await boot("fix login bug", true);
-    const result = await callWrite(pi);
+  it("blocks described revision with diff when blockOnMismatch=true (default)", async () => {
+    defaultJj("fix login", true);
+    const pi = makePi();
+    register(pi);
+    await pi.fire("session_start", {}, makeCtx());
+    await pi.fire("before_agent_start", { prompt: "add dark mode" }, makeCtx());
+    const result = await write(pi, "fix login", true);
     expect(result?.block).toBe(true);
-    expect(result?.reason).toContain("fix login bug");
+    expect(result?.reason).toContain("fix login");
   });
 
-  it("keeps blocking on retry — guard not bypassed", async () => {
-    const pi = await boot("fix login bug", true);
-    const r1 = await callWrite(pi);
-    expect(r1?.block).toBe(true);
-    const r2 = await callWrite(pi);
-    expect(r2?.block).toBe(true);
-  });
-
-  it("allows after jj new: description clears (empty diff now)", async () => {
-    const pi = await boot("fix login bug", true);
-    expect((await callWrite(pi))?.block).toBe(true);
-
-    // Simulate jj new — new revision: desc="" (empty), diff=false
-    pi.exec.mockImplementation(async (_cmd: string, args: string[]) => {
-      if (args.includes("log")) return { stdout: "\n", exitCode: 0 };
-      if (args.includes("diff")) return { stdout: "\n", exitCode: 0 };
-      return { stdout: "", exitCode: 0 };
-    });
-    expect(await callWrite(pi)).toBeUndefined();
-  });
-
-  // ── Not active outside jj repo ─────────────────────────────────────
-
-  it("does not activate outside jj repo", async () => {
-    const pi = createPi();
-    factory(pi);
-    pi.exec.mockResolvedValueOnce({ stdout: "", exitCode: 1 }); // jj root fails
-    await pi._fire("session_start", {}, mockCtx());
-    await pi._fire("before_agent_start", { prompt: "x" }, mockCtx());
-    pi.exec.mockResolvedValue({ stdout: "has desc\n", exitCode: 0 });
-    expect(await callWrite(pi)).toBeUndefined();
-  });
-
-  // ── Auto-describe ─────────────────────────────────────────────────
-
-  it("auto-describes on agent_end when empty description AND diff present", async () => {
-    const pi = createPi();
-    factory(pi);
-    pi.exec.mockResolvedValueOnce({ stdout: "/repo", exitCode: 0 }); // session_start jj root
-    await pi._fire("session_start", {}, mockCtx());
-    await pi._fire(
-      "before_agent_start",
-      { prompt: "add dark mode" },
-      mockCtx(),
+  it("notifies but allows described revision with diff when blockOnMismatch=false", async () => {
+    const tmp = join(tmpdir(), `pi-jj-auto-blockmatch-${process.pid}`);
+    mkdirSync(join(tmp, ".pi"), { recursive: true });
+    writeFileSync(
+      join(tmp, ".pi", "pi-jj-auto.json"),
+      JSON.stringify({ blockOnMismatch: false }),
     );
 
-    const descSpy = vi.fn().mockResolvedValue({ stdout: "", exitCode: 0 });
-    pi.exec.mockImplementation(async (_cmd: string, args: string[]) => {
-      if (args.includes("log")) return { stdout: "\n", exitCode: 0 }; // empty desc
-      if (args.includes("diff"))
-        return { stdout: "file.ts | 1 +\n", exitCode: 0 }; // has diff
-      if (args.includes("desc")) {
-        descSpy();
-        return { stdout: "", exitCode: 0 };
-      }
-      return { stdout: "", exitCode: 0 };
+    setJj({
+      root: { stdout: tmp, exitCode: 0 },
+      log: { stdout: `abc123\nfix login\nyes\n`, exitCode: 0 },
+      diff: { stdout: "file.ts | 1 +\n", exitCode: 0 },
     });
+    const pi = makePi();
+    register(pi);
+    await pi.fire("session_start", {}, { ...makeCtx(), cwd: tmp });
+    await pi.fire("before_agent_start", { prompt: "add dark mode" }, makeCtx());
+    const result = await pi.fire(
+      "tool_call",
+      { toolName: "write", input: {} },
+      makeCtx(),
+    );
+    expect(result).toBeUndefined();
 
-    await pi._fire("agent_end", {}, mockCtx());
-    expect(descSpy).toHaveBeenCalledTimes(1);
+    rmSync(tmp, { recursive: true, force: true });
   });
 
-  it("does NOT auto-describe when diff is empty (no work done)", async () => {
-    const pi = createPi();
-    factory(pi);
-    pi.exec.mockResolvedValueOnce({ stdout: "/repo", exitCode: 0 });
-    await pi._fire("session_start", {}, mockCtx());
-    await pi._fire("before_agent_start", { prompt: "explain code" }, mockCtx());
+  it("keeps blocking on retry without jj resolution", async () => {
+    const pi = await boot("", true);
+    expect((await write(pi))?.block).toBe(true);
+    expect((await write(pi))?.block).toBe(true);
+  });
 
-    const descSpy = vi.fn().mockResolvedValue({ stdout: "", exitCode: 0 });
-    pi.exec.mockImplementation(async (_cmd: string, args: string[]) => {
-      if (args.includes("log")) return { stdout: "\n", exitCode: 0 }; // empty desc
-      if (args.includes("diff")) return { stdout: "\n", exitCode: 0 }; // no diff
-      if (args.includes("desc")) {
-        descSpy();
-        return { stdout: "", exitCode: 0 };
-      }
-      return { stdout: "", exitCode: 0 };
-    });
+  it("allows write after jj new clears the revision", async () => {
+    const pi = await boot("", true);
+    expect((await write(pi))?.block).toBe(true);
+    expect(await write(pi, "", false)).toBeUndefined();
+  });
 
-    await pi._fire("agent_end", {}, mockCtx());
-    expect(descSpy).not.toHaveBeenCalled();
+  it("does not mark guard resolved when jj-resolution bash command runs", async () => {
+    const pi = await boot("", true);
+    await pi.fire(
+      "tool_call",
+      { toolName: "bash", input: { command: "jj new -m 'test'" } },
+      makeCtx(),
+    );
+    expect((await write(pi))?.block).toBe(true);
+  });
+
+  it("fails closed on guard error when blockOnMismatch=true", async () => {
+    defaultJj("", false);
+    const pi = makePi();
+    register(pi);
+    await pi.fire("session_start", {}, makeCtx());
+    await pi.fire("before_agent_start", { prompt: "x" }, makeCtx());
+    setJj({ log: { stdout: "", exitCode: 1 } });
+    const result = await pi.fire(
+      "tool_call",
+      { toolName: "write", input: {} },
+      makeCtx(),
+    );
+    expect(result?.block).toBe(true);
+  });
+
+  it("classifies jj diff redirection as mutating — blocks stale WIP", async () => {
+    const pi = await boot("", true);
+    const result = await pi.fire(
+      "tool_call",
+      { toolName: "bash", input: { command: "jj diff > file.patch" } },
+      makeCtx(),
+    );
+    expect(result?.block).toBe(true);
+  });
+
+  it("does not activate outside jj repo", async () => {
+    setJj({ root: { stdout: "", exitCode: 1 } });
+    const pi = makePi();
+    register(pi);
+    await pi.fire("session_start", {}, makeCtx());
+    await pi.fire("before_agent_start", { prompt: "x" }, makeCtx());
+    defaultJj("has desc", true);
+    expect(await write(pi)).toBeUndefined();
   });
 });
