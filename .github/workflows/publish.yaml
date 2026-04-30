@@ -1,0 +1,49 @@
+name: Publish to npm
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - package.json
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write  # Required for OIDC trusted publishing
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - name: Update npm (OIDC requires 11.5.1+)
+        run: npm install -g npm@latest
+
+      - name: Check if version changed
+        id: version
+        run: |
+          CURRENT=$(jq -r '.version' package.json)
+          PUBLISHED=$(npm view pi-jj-auto version 2>/dev/null || echo "0.0.0")
+          echo "current=$CURRENT" >> $GITHUB_OUTPUT
+          if [ "$CURRENT" != "$PUBLISHED" ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Publish
+        if: steps.version.outputs.changed == 'true'
+        run: npm publish --provenance --access public
+
+      - name: Create GitHub Release
+        if: steps.version.outputs.changed == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.current }}
+          name: v${{ steps.version.outputs.current }}
+          generate_release_notes: true

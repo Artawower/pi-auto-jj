@@ -1,0 +1,64 @@
+#+TITLE: PI JJ auto
+#+OPTIONS: toc:nil
+
+#+HTML: <p align="center">
+#+HTML: <a href="https://www.paypal.me/darkawower" title="Donate via PayPal" target="_blank">
+#+HTML:   <img src="https://img.shields.io/badge/PayPal-Donate-00457C?style=for-the-badge&logo=paypal&logoColor=white" alt="Donate via PayPal">
+#+HTML: </a>
+#+HTML: <a href="https://patreon.com/artawower" title="Support on Patreon" target="_blank">
+#+HTML:   <img src="https://img.shields.io/badge/Patreon-Support-F96854?style=for-the-badge&logo=patreon&logoColor=white" alt="Support on Patreon">
+#+HTML: </a>
+#+HTML: </p>
+
+Automatic [[https://github.com/martinvonz/jj][jj]] revision management for [[https://pi.dev][pi]] coding agent.
+
+* What it does
+
+- 🛡️ /Guards file edits/ — blocks =write= / =edit= when the current jj revision is sealed
+- 🏷️ /Auto-describes/ — sets revision description from your prompt when work finishes on an empty revision
+- 🤖 /LLM decides/ — blocked edits show clear instructions, the model chooses =jj new= or =jj desc=
+
+* Install
+
+#+BEGIN_SRC bash
+pi install npm:pi-jj-auto
+#+END_SRC
+
+Or from source:
+
+#+BEGIN_SRC bash
+pi install https://github.com/Artawower/pi-auto-jj.git
+#+END_SRC
+
+* How it works
+
+1. You send a prompt
+2. LLM tries to edit a file
+3. Extension checks: does the current jj revision already have a description?
+   - *Empty* → pass through (fresh revision, work freely)
+   - *Has description* → block with guidance:
+     - New task? → =jj new -m "..."=
+     - Same task? → =jj desc -m "..."=
+4. LLM runs the right jj command, retries the edit
+5. When done, auto-describes if the revision is still empty
+
+* Configuration
+
+Global: =~/.pi/agent/pi-jj-auto.json= \\
+Project: =.pi/pi-jj-auto.json=
+
+#+BEGIN_SRC json
+{
+  "enabled": true,
+  "blockOnMismatch": true,
+  "autoDescribe": true,
+  "maxPromptLength": 72
+}
+#+END_SRC
+
+| Field              | Type    | Default | Description                                      |
+|--------------------+---------+---------+--------------------------------------------------|
+| =enabled=          | boolean | =true=  | Enable/disable                                    |
+| =blockOnMismatch=  | boolean | =true=  | Block edits or just notify                        |
+| =autoDescribe=     | boolean | =true=  | Auto-set description on empty revisions           |
+| =maxPromptLength=  | number  | =72=    | Max prompt length for auto-describe               |

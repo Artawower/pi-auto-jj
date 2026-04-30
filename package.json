@@ -1,0 +1,24 @@
+{
+  "name": "pi-jj-auto",
+  "version": "0.1.1",
+  "description": "Automatic jj revision management — guards file edits to keep Jujutsu revisions focused",
+  "keywords": [
+    "pi-package"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Artawower/pi-auto-jj"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  }
+}
