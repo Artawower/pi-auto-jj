@@ -1,0 +1,7 @@
+node_modules/
+test-stubs/
+vitest.config.ts
+extensions/index.test.ts
+.github/
+.jjignore
+README.org
