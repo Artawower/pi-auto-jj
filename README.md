@@ -39,9 +39,9 @@ Project: `.pi/pi-jj-auto.json`
 }
 ```
 
-| Field             | Type    | Default | Description                             |
-| ----------------- | ------- | ------- | --------------------------------------- |
-| `enabled`         | boolean | `true`  | Enable/disable                          |
-| `blockOnMismatch` | boolean | `true`  | Block edits or just notify              |
-| `autoDescribe`    | boolean | `true`  | Auto-set description on empty revisions |
-| `maxPromptLength` | number  | `72`    | Max prompt length for auto-describe     |
+| Field             | Type    | Default | Description                                                |
+| ----------------- | ------- | ------- | ---------------------------------------------------------- |
+| `enabled`         | boolean | `true`  | Enable/disable                                             |
+| `blockOnMismatch` | boolean | `true`  | Block edits or just notify                                 |
+| `autoDescribe`    | boolean | `true`  | Warn at turn end when revision has diff but no description |
+| `maxPromptLength` | number  | `72`    | Max prompt length for auto-describe                        |

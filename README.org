@@ -34,13 +34,13 @@ pi install https://github.com/Artawower/pi-auto-jj.git
 
 1. You send a prompt
 2. LLM tries to edit a file
-3. Extension checks: does the current jj revision already have a description?
-   - *Empty* → pass through (fresh revision, work freely)
-   - *Has description* → block with guidance:
-     - New task? → =jj new -m "..."=
-     - Same task? → =jj desc -m "..."=
+3. Extension checks the current jj revision (description × diff state):
+   - *Empty description, no diff* → pass through (fresh revision, work freely)
+   - *Empty description, has diff* → block: run =jj describe -m= or =jj new -m= first
+   - *Has description, no diff* → pass through (clean slate for new work)
+   - *Has description, has diff* → block: same task? =jj describe -m=, new task? =jj new -m=
 4. LLM runs the right jj command, retries the edit
-5. When done, auto-describes if the revision is still empty
+5. When done, warns if the revision still has no description
 
 * Configuration
 
