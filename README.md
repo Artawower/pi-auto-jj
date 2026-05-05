@@ -44,4 +44,12 @@ Project: `.pi/pi-jj-auto.json`
 | `enabled`         | boolean | `true`  | Enable/disable                                             |
 | `blockOnMismatch` | boolean | `true`  | Block edits or just notify                                 |
 | `autoDescribe`    | boolean | `true`  | Warn at turn end when revision has diff but no description |
-| `maxPromptLength` | number  | `72`    | Max prompt length for auto-describe                        |
+| `maxPromptLength` | number  | `72`    | Max task length in guard messages                          |
+
+## Debug
+
+Run pi with debug logging to verify activation, skill injection, and bash classification:
+
+```bash
+PI_JJ_AUTO_DEBUG=1 pi
+```

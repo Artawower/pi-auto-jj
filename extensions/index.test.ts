@@ -209,6 +209,20 @@ describe("guard lifecycle", async () => {
 
 	beforeEach(() => setJj({}));
 
+	it("injects skill content on first agent start", async () => {
+		defaultJj("", false);
+		const pi = makePi();
+		register(pi);
+		await pi.fire("session_start", {}, makeCtx());
+
+		const result = await pi.fire(
+			"before_agent_start",
+			{ prompt: "x", systemPrompt: "base" },
+			makeCtx(),
+		);
+		expect(result?.systemPrompt).toContain("pi-jj-auto");
+	});
+
 	it("allows write on fresh revision (empty desc, no diff)", async () => {
 		const pi = await boot("", false);
 		expect(await write(pi)).toBeUndefined();
@@ -349,6 +363,48 @@ describe("guard lifecycle", async () => {
 		);
 		// 2>&1 is a fd-redirect, not a file write — classified as "safe", guard does not fire
 		expect(result).toBeUndefined();
+	});
+
+	it("does not classify stderr redirect to /dev/null as mutating", async () => {
+		const pi = await boot("fix login", true);
+		const result = await pi.fire(
+			"tool_call",
+			{
+				toolName: "bash",
+				input: {
+					command:
+						'find /tmp/project -type f | head -50 && echo "---" && cat /tmp/project/README.md 2>/dev/null',
+				},
+			},
+			makeCtx(),
+		);
+		expect(result).toBeUndefined();
+	});
+
+	it("does not classify git diff stderr redirect to /dev/null as mutating", async () => {
+		const pi = await boot("fix login", true);
+		const result = await pi.fire(
+			"tool_call",
+			{
+				toolName: "bash",
+				input: {
+					command:
+						"cd /tmp/project && git diff HEAD --name-only 2>/dev/null || echo NO_GIT_DIFF",
+				},
+			},
+			makeCtx(),
+		);
+		expect(result).toBeUndefined();
+	});
+
+	it("classifies stderr redirect to a real file as mutating", async () => {
+		const pi = await boot("", true);
+		const result = await pi.fire(
+			"tool_call",
+			{ toolName: "bash", input: { command: "cmd 2>error.log" } },
+			makeCtx(),
+		);
+		expect(result?.block).toBe(true);
 	});
 
 	it("does not classify 'node --version' as mutating", async () => {

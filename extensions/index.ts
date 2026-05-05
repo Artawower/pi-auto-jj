@@ -22,18 +22,27 @@ type BashCommandKind = "jj-readonly" | "jj-resolution" | "mutating" | "safe";
 const JJ_READONLY_RE = /\bjj\s+(?:log|status|st|diff|root|show|file|cat)\b/;
 const JJ_RESOLUTION_RE = /\bjj\s+(?:new|desc|describe)\b/;
 const MUTATING_SHELL_RE =
-	/\b(?:chmod|chown|touch|mkdir|rm|rmdir|mv|cp|sed\s+-i|tee)\b|cat\s*>|printf\s[^|]*>|echo\s[^|]*>/;
-const SHELL_REDIRECT_RE = /(?:^|[^<])>(?![>&])/;
-
+	/\b(?:chmod|chown|touch|mkdir|rm|rmdir|mv|cp|sed\s+-i|tee)\b/;
 const GUARDED_TOOLS = new Set(["write", "edit"]);
+const PROCESS = (
+	globalThis as {
+		process?: {
+			env?: Record<string, string | undefined>;
+			stderr?: { write: (message: string) => void };
+		};
+	}
+).process;
+const DEBUG_ENABLED = PROCESS?.env?.PI_JJ_AUTO_DEBUG === "1";
 
 export default function register(pi: ExtensionAPI): void {
 	let state: SessionState | null = null;
 
 	pi.on("session_start", async (_event, ctx) => {
 		const config = loadConfig(ctx.cwd);
+		const repo = config.enabled ? await isJjRepo(ctx.cwd) : false;
 
-		if (!config.enabled || !(await isJjRepo(ctx.cwd))) {
+		if (!config.enabled || !repo) {
+			debugLog("inactive", { cwd: ctx.cwd, enabled: config.enabled, repo });
 			state = null;
 			return;
 		}
@@ -47,6 +56,10 @@ export default function register(pi: ExtensionAPI): void {
 			skillInjected: false,
 		};
 
+		debugLog("active", {
+			cwd: ctx.cwd,
+			skillContentLength: state.skillContent.length,
+		});
 		if (ctx.hasUI) ctx.ui.setStatus("pi-jj-auto", "✓ active");
 	});
 
@@ -59,7 +72,7 @@ export default function register(pi: ExtensionAPI): void {
 		if (state) state.skillInjected = false;
 	});
 
-	pi.on("before_agent_start", async (event, ctx) => {
+	pi.on("before_agent_start", async (event, _ctx) => {
 		if (!state) return;
 
 		state.prompt = event.prompt;
@@ -67,16 +80,27 @@ export default function register(pi: ExtensionAPI): void {
 
 		if (!state.skillInjected && state.skillContent) {
 			state.skillInjected = true;
+			debugLog("inject skill", { promptLength: event.prompt.length });
 			return {
 				systemPrompt: event.systemPrompt + "\n\n" + state.skillContent,
 			};
 		}
+
+		debugLog("skip skill inject", {
+			skillInjected: state.skillInjected,
+			skillContentLength: state.skillContent.length,
+		});
 	});
 
 	pi.on("tool_call", async (event: ToolCallEvent, ctx) => {
 		if (!state || state.guardResolved) return;
 
 		const bashKind = classifyBashCommand(event);
+		debugLog("tool_call", {
+			toolName: event.toolName,
+			bashKind,
+			command: firstLine(extractBashCommand(event), 120),
+		});
 
 		if (bashKind === "jj-readonly") return;
 
@@ -180,12 +204,38 @@ function classifyBashCommand(event: ToolCallEvent): BashCommandKind {
 	const command = extractBashCommand(event);
 	if (!command) return "safe";
 
-	if (SHELL_REDIRECT_RE.test(command)) return "mutating";
+	if (hasFileOutputRedirect(command)) return "mutating";
 	if (MUTATING_SHELL_RE.test(command)) return "mutating";
 	if (JJ_READONLY_RE.test(command)) return "jj-readonly";
 	if (JJ_RESOLUTION_RE.test(command)) return "jj-resolution";
 
 	return "safe";
+}
+
+function hasFileOutputRedirect(command: string): boolean {
+	const outputRedirectRe =
+		/(?:^|[^<])((?:\d*>>?)|(?:&>>?)|(?:>\|))\s*("[^"]*"|'[^']*'|[^\s;&|]+)/g;
+	let match: RegExpExecArray | null;
+	while ((match = outputRedirectRe.exec(command))) {
+		const target = normalizeRedirectTarget(match[2] ?? "");
+		if (!target) continue;
+		if (target.startsWith("&")) continue; // fd redirect: 2>&1, >&2
+		if (target.startsWith("(")) continue; // process substitution: >(cmd)
+		if (target === "/dev/null") continue;
+		return true;
+	}
+	return false;
+}
+
+function normalizeRedirectTarget(raw: string): string {
+	const trimmed = raw.trim();
+	if (
+		(trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+		(trimmed.startsWith("'") && trimmed.endsWith("'"))
+	) {
+		return trimmed.slice(1, -1);
+	}
+	return trimmed;
 }
 
 function extractBashCommand(event: ToolCallEvent): string {
@@ -214,5 +264,17 @@ function loadSkillContent(): string {
 			return content.replace(/^---[\s\S]*?---\n/, "").trim();
 		}
 	}
+	debugLog("skill content not found", { paths });
 	return "";
+}
+
+function debugLog(message: string, details?: Record<string, unknown>): void {
+	if (!DEBUG_ENABLED) return;
+	const suffix = details ? ` ${JSON.stringify(details)}` : "";
+	const line = `[pi-jj-auto] ${message}${suffix}\n`;
+	if (PROCESS?.stderr) {
+		PROCESS.stderr.write(line);
+		return;
+	}
+	console.debug(line.trimEnd());
 }
