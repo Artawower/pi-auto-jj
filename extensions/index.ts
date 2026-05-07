@@ -255,8 +255,10 @@ function firstLine(text: string, maxLength: number): string {
 function loadSkillContent(): string {
 	const dir = dirname(fileURLToPath(import.meta.url));
 	const paths = [
-		join(dir, "../skills/SKILL.md"),
-		join(dir, "../../skills/SKILL.md"),
+		join(dir, "../skills/pi-jj-auto/SKILL.md"),
+		join(dir, "../../skills/pi-jj-auto/SKILL.md"),
+		join(dir, "../skills/SKILL.md"), // legacy package layout
+		join(dir, "../../skills/SKILL.md"), // legacy dev layout
 	];
 	for (const p of paths) {
 		if (existsSync(p)) {

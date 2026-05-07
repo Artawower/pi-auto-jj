@@ -21,7 +21,7 @@
       "./extensions"
     ],
     "skills": [
-      "./skills"
+      "./skills/pi-jj-auto"
     ]
   }
 }
