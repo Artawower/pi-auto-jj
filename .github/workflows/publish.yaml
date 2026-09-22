@@ -36,6 +36,14 @@ jobs:
             echo "changed=false" >> $GITHUB_OUTPUT
           fi
 
+      - name: Install dependencies
+        if: steps.version.outputs.changed == 'true'
+        run: npm ci
+
+      - name: Run verification checks
+        if: steps.version.outputs.changed == 'true'
+        run: npm run check
+
       - name: Publish
         if: steps.version.outputs.changed == 'true'
         run: npm publish --provenance --access public
