@@ -6,7 +6,13 @@ import type {
 	ToolCallEvent,
 } from "@mariozechner/pi-coding-agent";
 import { loadConfig, type Config } from "./config.js";
-import { isJjRepo, getRevisionInfo } from "./jj.js";
+import {
+	isJjRepo,
+	getRevisionInfo,
+	describeRevision,
+	type RevisionInfo,
+} from "./jj.js";
+import { classifyShellCommand } from "./shell.js";
 
 interface SessionState {
 	readonly cwd: string;
@@ -14,16 +20,21 @@ interface SessionState {
 	readonly skillContent: string;
 	prompt: string;
 	guardResolved: boolean;
-	skillInjected: boolean;
+	turnFinished?: boolean;
+	baselineRevision?: RevisionInfo;
+	mutatedInTurn?: boolean;
+	blockedRevision?: { changeId: string; description: string };
+	pendingResolutions: Map<
+		string,
+		{ kind: "desc" | "new"; targetChangeId: string }
+	>;
+	pendingMutations: Set<string>;
+	successfulResolution?: { kind: "desc" | "new"; targetChangeId: string };
 }
 
-type BashCommandKind = "jj-readonly" | "jj-resolution" | "mutating" | "safe";
-
-const JJ_READONLY_RE = /\bjj\s+(?:log|status|st|diff|root|show|file|cat)\b/;
-const JJ_RESOLUTION_RE = /\bjj\s+(?:new|desc|describe)\b/;
-const MUTATING_SHELL_RE =
-	/\b(?:chmod|chown|touch|mkdir|rm|rmdir|mv|cp|sed\s+-i|tee)\b/;
 const GUARDED_TOOLS = new Set(["write", "edit"]);
+const SHELL_TOOLS = new Set(["bash", "powershell"]);
+
 const PROCESS = (
 	globalThis as {
 		process?: {
@@ -53,7 +64,8 @@ export default function register(pi: ExtensionAPI): void {
 			skillContent: loadSkillContent(),
 			prompt: "",
 			guardResolved: false,
-			skillInjected: false,
+			pendingResolutions: new Map(),
+			pendingMutations: new Set(),
 		};
 
 		debugLog("active", {
@@ -64,12 +76,8 @@ export default function register(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
-		if (ctx.hasUI) ctx.ui.setStatus("pi-jj-auto", "");
+		if (ctx.hasUI) ctx.ui.setStatus("pi-jj-auto", undefined);
 		state = null;
-	});
-
-	pi.on("session_compact", async (_event, _ctx) => {
-		if (state) state.skillInjected = false;
 	});
 
 	pi.on("before_agent_start", async (event, _ctx) => {
@@ -77,46 +85,124 @@ export default function register(pi: ExtensionAPI): void {
 
 		state.prompt = event.prompt;
 		state.guardResolved = false;
+		state.turnFinished = false;
+		state.mutatedInTurn = false;
+		state.blockedRevision = undefined;
+		state.pendingResolutions.clear();
+		state.pendingMutations.clear();
+		state.successfulResolution = undefined;
 
-		if (!state.skillInjected && state.skillContent) {
-			state.skillInjected = true;
-			debugLog("inject skill", { promptLength: event.prompt.length });
-			return {
-				systemPrompt: event.systemPrompt + "\n\n" + state.skillContent,
-			};
+		try {
+			state.baselineRevision = await getRevisionInfo(state.cwd);
+		} catch {
+			state.baselineRevision = undefined;
 		}
 
-		debugLog("skip skill inject", {
-			skillInjected: state.skillInjected,
-			skillContentLength: state.skillContent.length,
-		});
+		const currentSystemPrompt =
+			typeof event.systemPrompt === "string" ? event.systemPrompt : "";
+		if (
+			state.skillContent &&
+			!currentSystemPrompt.includes(state.skillContent)
+		) {
+			debugLog("inject skill", { promptLength: event.prompt.length });
+			return {
+				systemPrompt: currentSystemPrompt
+					? currentSystemPrompt + "\n\n" + state.skillContent
+					: state.skillContent,
+			};
+		}
 	});
 
 	pi.on("tool_call", async (event: ToolCallEvent, ctx) => {
-		if (!state || state.guardResolved) return;
+		if (!state) return;
+		const toolCallId = event.toolCallId ?? "";
 
-		const bashKind = classifyBashCommand(event);
-		debugLog("tool_call", {
-			toolName: event.toolName,
-			bashKind,
-			command: firstLine(extractBashCommand(event), 120),
-		});
+		if (SHELL_TOOLS.has(event.toolName)) {
+			const command = extractBashCommand(event);
+			const classification = classifyShellCommand(command);
 
-		if (bashKind === "jj-readonly") return;
+			if (
+				classification.kind === "jj-readonly" ||
+				classification.kind === "safe"
+			) {
+				return;
+			}
 
-		if (bashKind === "jj-resolution") return;
+			if (classification.kind === "jj-resolution") {
+				state.pendingResolutions.set(toolCallId, {
+					kind: classification.resolutionType,
+					targetChangeId: state.blockedRevision?.changeId ?? "",
+				});
+				return;
+			}
+		} else if (!GUARDED_TOOLS.has(event.toolName)) {
+			return;
+		}
 
-		if (!GUARDED_TOOLS.has(event.toolName) && bashKind !== "mutating") return;
+		if (state.guardResolved) {
+			state.pendingMutations.add(toolCallId);
+			return undefined;
+		}
 
 		try {
 			const revision = await getRevisionInfo(state.cwd, ctx.signal);
-			return applyGuard(
+
+			if (state.successfulResolution) {
+				const res = state.successfulResolution;
+				if (res.kind === "desc") {
+					const matchesTarget =
+						!res.targetChangeId || revision.changeId === res.targetChangeId;
+					const descNonEmpty = revision.description.trim().length > 0;
+					if (matchesTarget && descNonEmpty) {
+						state.guardResolved = true;
+						state.blockedRevision = undefined;
+						state.successfulResolution = undefined;
+						state.pendingMutations.add(toolCallId);
+						return undefined;
+					}
+				} else if (res.kind === "new") {
+					const changeIdChanged =
+						!res.targetChangeId || revision.changeId !== res.targetChangeId;
+					const noDiff = !revision.hasDiff;
+					if (changeIdChanged && noDiff) {
+						state.guardResolved = true;
+						state.blockedRevision = undefined;
+						state.successfulResolution = undefined;
+						state.pendingMutations.add(toolCallId);
+						return undefined;
+					}
+				}
+			}
+
+			const guardResult = applyGuard(
 				revision,
 				state,
 				ctx.hasUI ? ctx.ui.notify.bind(ctx.ui) : undefined,
 			);
-		} catch (err) {
-			console.error("[pi-jj-auto] guard check failed:", err);
+
+			if (guardResult?.block) {
+				state.blockedRevision = {
+					changeId: revision.changeId,
+					description: revision.description,
+				};
+				return guardResult;
+			}
+
+			state.pendingMutations.add(toolCallId);
+			return undefined;
+		} catch (err: unknown) {
+			if (
+				ctx.signal?.aborted ||
+				(err instanceof Error &&
+					(err.name === "AbortError" ||
+						err.message.includes("ABORT_ERR") ||
+						err.message.includes("aborted")))
+			) {
+				return;
+			}
+			const message =
+				err instanceof Error ? (err.stack ?? err.message) : String(err);
+			console.error(`[pi-jj-auto] guard check failed: ${message}`);
 			if (state.config.blockOnMismatch) {
 				return {
 					block: true,
@@ -127,20 +213,98 @@ export default function register(pi: ExtensionAPI): void {
 		}
 	});
 
-	pi.on("agent_end", async (_event, ctx) => {
-		if (!state || !state.config.autoDescribe || !ctx.hasUI) return;
+	pi.on("tool_result", async (event: any, _ctx) => {
+		if (!state) return;
+		const toolCallId = event.toolCallId ?? "";
+
+		const isError = Boolean(
+			event.isError ||
+				(event.details &&
+					typeof event.details.exitCode === "number" &&
+					event.details.exitCode !== 0),
+		);
+
+		if (state.pendingResolutions.has(toolCallId)) {
+			const pending = state.pendingResolutions.get(toolCallId)!;
+			state.pendingResolutions.delete(toolCallId);
+			if (!isError) {
+				state.successfulResolution = pending;
+			}
+		}
+
+		if (state.pendingMutations.has(toolCallId)) {
+			state.pendingMutations.delete(toolCallId);
+			if (!isError) {
+				state.mutatedInTurn = true;
+			}
+		}
+	});
+
+	const handleAgentFinish = async (ctx: {
+		signal?: AbortSignal;
+		hasUI?: boolean;
+		ui?: { notify: (msg: string, kind: "info" | "warning") => void };
+	}) => {
+		if (!state || state.turnFinished || ctx.signal?.aborted) return;
+		state.turnFinished = true;
 
 		try {
-			const info = await getRevisionInfo(state.cwd, ctx.signal);
-			if (!info.description && info.hasDiff) {
-				ctx.ui.notify(
-					'pi-jj-auto: revision has changes but no description — run `jj describe -m "<summary>"`',
-					"warning",
-				);
+			const finalRev = await getRevisionInfo(state.cwd, ctx.signal);
+			const shouldAutoDescribe =
+				state.baselineRevision !== undefined &&
+				state.baselineRevision.changeId === finalRev.changeId &&
+				!state.baselineRevision.description &&
+				!state.baselineRevision.hasDiff &&
+				state.mutatedInTurn &&
+				finalRev.hasDiff &&
+				!finalRev.description;
+
+			if (shouldAutoDescribe) {
+				if (state.config.autoDescribe) {
+					const message = firstLine(state.prompt, state.config.maxPromptLength);
+					if (message) {
+						await describeRevision(
+							state.cwd,
+							finalRev.changeId,
+							message,
+							ctx.signal,
+						);
+						if (ctx.hasUI && ctx.ui) {
+							ctx.ui.notify(
+								`pi-jj-auto: described revision as "${message}"`,
+								"info",
+							);
+						}
+					}
+				} else if (ctx.hasUI && ctx.ui) {
+					ctx.ui.notify(
+						'pi-jj-auto: revision has changes but no description — run `jj describe -m "<summary>"`',
+						"warning",
+					);
+				}
 			}
-		} catch (err) {
-			console.error("[pi-jj-auto] agent_end check failed:", err);
+		} catch (err: unknown) {
+			if (
+				ctx.signal?.aborted ||
+				(err instanceof Error &&
+					(err.name === "AbortError" ||
+						err.message.includes("ABORT_ERR") ||
+						err.message.includes("aborted")))
+			) {
+				return;
+			}
+			const message =
+				err instanceof Error ? (err.stack ?? err.message) : String(err);
+			console.error(`[pi-jj-auto] auto-describe failed: ${message}`);
 		}
+	};
+
+	pi.on("agent_end", async (_event, ctx) => {
+		await handleAgentFinish(ctx);
+	});
+
+	pi.on("agent_settled", async (_event, ctx) => {
+		await handleAgentFinish(ctx);
 	});
 }
 
@@ -198,46 +362,6 @@ function applyGuard(
 	return undefined;
 }
 
-function classifyBashCommand(event: ToolCallEvent): BashCommandKind {
-	if (event.toolName !== "bash") return "safe";
-
-	const command = extractBashCommand(event);
-	if (!command) return "safe";
-
-	if (hasFileOutputRedirect(command)) return "mutating";
-	if (MUTATING_SHELL_RE.test(command)) return "mutating";
-	if (JJ_READONLY_RE.test(command)) return "jj-readonly";
-	if (JJ_RESOLUTION_RE.test(command)) return "jj-resolution";
-
-	return "safe";
-}
-
-function hasFileOutputRedirect(command: string): boolean {
-	const outputRedirectRe =
-		/(?:^|[^<])((?:\d*>>?)|(?:&>>?)|(?:>\|))\s*("[^"]*"|'[^']*'|[^\s;&|]+)/g;
-	let match: RegExpExecArray | null;
-	while ((match = outputRedirectRe.exec(command))) {
-		const target = normalizeRedirectTarget(match[2] ?? "");
-		if (!target) continue;
-		if (target.startsWith("&")) continue; // fd redirect: 2>&1, >&2
-		if (target.startsWith("(")) continue; // process substitution: >(cmd)
-		if (target === "/dev/null") continue;
-		return true;
-	}
-	return false;
-}
-
-function normalizeRedirectTarget(raw: string): string {
-	const trimmed = raw.trim();
-	if (
-		(trimmed.startsWith('"') && trimmed.endsWith('"')) ||
-		(trimmed.startsWith("'") && trimmed.endsWith("'"))
-	) {
-		return trimmed.slice(1, -1);
-	}
-	return trimmed;
-}
-
 function extractBashCommand(event: ToolCallEvent): string {
 	const input = event.input as Record<string, unknown>;
 	return String(input?.command ?? input?.cmd ?? input?.script ?? "").trim();
@@ -257,8 +381,8 @@ function loadSkillContent(): string {
 	const paths = [
 		join(dir, "../skills/pi-jj-auto/SKILL.md"),
 		join(dir, "../../skills/pi-jj-auto/SKILL.md"),
-		join(dir, "../skills/SKILL.md"), // legacy package layout
-		join(dir, "../../skills/SKILL.md"), // legacy dev layout
+		join(dir, "../skills/SKILL.md"),
+		join(dir, "../../skills/SKILL.md"),
 	];
 	for (const p of paths) {
 		if (existsSync(p)) {

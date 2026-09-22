@@ -18,8 +18,9 @@ const DEFAULTS: Config = {
   maxPromptLength: 72,
 };
 
-export function loadConfig(cwd: string): Config {
-  const global = readJsonFile(join(getAgentDir(), "pi-jj-auto.json"));
+export function loadConfig(cwd: string, agentDir?: string): Config {
+  const globalDir = agentDir ?? getAgentDir();
+  const global = readJsonFile(join(globalDir, "pi-jj-auto.json"));
   const project = readJsonFile(join(cwd, ".pi", "pi-jj-auto.json"));
   return parseConfig({ ...global, ...project });
 }
@@ -47,11 +48,13 @@ function parseConfig(raw: Record<string, unknown>): Config {
   };
 }
 
-function parsePositiveInt(
+export function parsePositiveInt(
   value: unknown,
   fallback: number,
   max: number,
 ): number {
-  if (typeof value !== "number" || value <= 0) return fallback;
-  return Math.min(value, max);
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  const integer = Math.floor(value);
+  if (integer <= 0) return fallback;
+  return Math.min(integer, max);
 }

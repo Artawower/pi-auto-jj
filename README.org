@@ -40,7 +40,7 @@ pi install https://github.com/Artawower/pi-auto-jj.git
    - *Has description, no diff* → pass through (clean slate for new work)
    - *Has description, has diff* → block: same task? =jj describe -m=, new task? =jj new -m=
 4. LLM runs the right jj command, retries the edit
-5. When done, warns if the revision still has no description
+5. When done, auto-describes the revision from your prompt if description is still empty (or warns if disabled)
 
 * Configuration
 
@@ -60,7 +60,7 @@ Project: =.pi/pi-jj-auto.json=
 |--------------------+---------+---------+--------------------------------------------------|
 | =enabled=          | boolean | =true=  | Enable/disable                                    |
 | =blockOnMismatch=  | boolean | =true=  | Block edits or just notify                        |
-| =autoDescribe=     | boolean | =true=  | Warn when revision has diff but no description     |
+| =autoDescribe=     | boolean | =true=  | Auto-describe revision when diff exists but description empty (warns if false) |
 | =maxPromptLength=  | number  | =72=    | Max task length in guard messages                 |
 
 * Debug

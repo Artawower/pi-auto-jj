@@ -11,21 +11,43 @@ export async function getRevisionInfo(
   signal?: AbortSignal,
 ): Promise<RevisionInfo> {
   const template =
-    'change_id.short() ++ "\\n" ++ if(description, description, "") ++ "\\n" ++ if(diff.files(), "yes", "no")';
+    'concat("{\\"changeId\\":", change_id.short().escape_json(), ",\\"description\\":", description.escape_json(), ",\\"hasDiff\\":", if(diff.files(), "true", "false"), "}")';
 
   const { stdout } = await jj(
     ["log", "--no-graph", "-r", "@", "--template", template],
     cwd,
     signal,
   );
-  const [changeId = "", description = "", diffFlag = "no"] = stdout
-    .trim()
-    .split("\n");
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout.trim());
+  } catch (err) {
+    throw new Error(`Failed to parse jj revision JSON: ${stdout.trim()}`, {
+      cause: err,
+    });
+  }
+
+  if (
+    !parsed ||
+    typeof parsed !== "object" ||
+    typeof (parsed as Record<string, unknown>).changeId !== "string" ||
+    typeof (parsed as Record<string, unknown>).description !== "string" ||
+    typeof (parsed as Record<string, unknown>).hasDiff !== "boolean"
+  ) {
+    throw new Error(`Invalid jj revision info payload: ${stdout.trim()}`);
+  }
+
+  const raw = parsed as {
+    changeId: string;
+    description: string;
+    hasDiff: boolean;
+  };
 
   return {
-    changeId: changeId.trim(),
-    description: description.trim(),
-    hasDiff: diffFlag.trim() === "yes",
+    changeId: raw.changeId.trim(),
+    description: raw.description.trim(),
+    hasDiff: raw.hasDiff,
   };
 }
 
@@ -58,10 +80,11 @@ export async function hasDiff(
 
 export async function describeRevision(
   cwd: string,
+  changeId: string,
   message: string,
   signal?: AbortSignal,
 ): Promise<void> {
-  await jj(["desc", "-m", message], cwd, signal);
+  await jj(["desc", "-r", changeId, "-m", message], cwd, signal);
 }
 
 export async function isJjRepo(cwd: string): Promise<boolean> {
@@ -78,20 +101,34 @@ function jj(
   cwd: string,
   signal?: AbortSignal,
 ): Promise<{ stdout: string }> {
+  if (signal?.aborted) {
+    const abortErr = new Error("The operation was aborted");
+    abortErr.name = "AbortError";
+    return Promise.reject(abortErr);
+  }
+
   return new Promise((resolve, reject) => {
-    const child = execFile(
+    execFile(
       "jj",
-      args,
+      ["--no-pager", "--color=never", ...args],
       { cwd, signal, encoding: "utf8", maxBuffer: 10 * 1024 * 1024 },
       (error, stdout, stderr) => {
         if (error) {
-          reject(new Error(`jj ${args.join(" ")} failed: ${stderr}`));
+          const detail = (stderr ?? "").trim() || error.message;
+          const err = new Error(`jj ${args.join(" ")} failed: ${detail}`, {
+            cause: error,
+          });
+          if (
+            error.name === "AbortError" ||
+            (error as unknown as { code?: string }).code === "ABORT_ERR"
+          ) {
+            err.name = "AbortError";
+          }
+          reject(err);
         } else {
           resolve({ stdout: stdout ?? "" });
         }
       },
     );
-
-    signal?.addEventListener("abort", () => child.kill(), { once: true });
   });
 }
